@@ -1,133 +1,83 @@
 import os
-import requests
+import streamlit as st
+import google.generativeai as genai
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import Chroma
-from langchain_core.embeddings import Embeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sklearn.feature_extraction.text import HashingVectorizer
-import streamlit as st
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-VECTOR_DB_DIR = "./vector_db"
-DOCS_DIR = "./data"
+# 1. إعداد مفتاح Gemini API
+api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
+else:
+    st.error("الرجاء إعداد GEMINI_API_KEY في إعدادات المنصة (Secrets).")
 
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-class FixedHashingEmbeddings(Embeddings):
+st.set_page_config(page_title="نظام البحث الذكي للمكتبة (RAG)", layout="wide")
 
-  def __init__(self, n_features=384):
-    self.vectorizer = HashingVectorizer(n_features=n_features, alternate_sign=False)
-
-  def embed_documents(self, texts: list[str]) -> list[list[float]]:
-    matrix = self.vectorizer.transform(texts)
-    return matrix.toarray().tolist()
-
-  def embed_query(self, text: str) -> list[float]:
-    matrix = self.vectorizer.transform([text])
-    return matrix.toarray()[0].tolist()
-
-
-def clean_arabic_text(text: str) -> str:
-  if not text:
-    return ""
-  lines = [line.strip() for line in text.split("\n") if line.strip()]
-  return " ".join(lines)
-
-
-def query_ollama_llm(context: str, query: str) -> str:
-  prompt = f"""بناءً على النص المستخرج التالي، أجب عن السؤال باختصار ودقة باللغة العربية:
-
-النص المستخرج:
-{context}
-
-السؤال: {query}
-الإجابة الذكية:"""
-
-  try:
-    response = requests.post(
-        "http://127.0.0.1:11434/api/generate",
-        json={"model": "llama3", "prompt": prompt, "stream": False},
-        timeout=120,
-    )
-    if response.status_code == 200:
-      return response.json().get("response", "لم يتم استرجاع إجابة.")
-    else:
-      return f"⚠️ خطأ في الاستجابة (رمز الحالة: {response.status_code})"
-  except Exception as e:
-    return f"⚠️ تجاوزت مهلة الانتظار أو تعذر الاتصال بـ Ollama. التفاصيل: {e}"
-
-
-st.set_page_config(
-    page_title="نظام البحث الذكي في المكتبة", page_icon="📚", layout="wide"
-)
-st.title("📚 نظام البحث الذكي والتوليد الآلي (RAG + LLM)")
-
+# 2. القائمة الجانبية لرفع المستندات وفهرستها
 st.sidebar.header("📁 إدارة المستندات")
-uploaded_file = st.sidebar.file_uploader("اختر ملف PDF لرفعه", type=["pdf"])
+uploaded_file = st.sidebar.file_uploader("لرفع PDF اختر ملف", type=["pdf"])
+
+persist_directory = "vector_db"
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 if uploaded_file is not None:
-  if not os.path.exists(DOCS_DIR):
-    os.makedirs(DOCS_DIR)
+    # حفظ الملف مؤقتًا على الخادم
+    os.makedirs("data", exist_ok=True)
+    file_path = os.path.join("data", uploaded_file.name)
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    st.sidebar.success(f"تم رفع الملف: {uploaded_file.name}")
 
-  file_path = os.path.join(DOCS_DIR, uploaded_file.name)
-  with open(file_path, "wb") as f:
-    f.write(uploaded_file.getbuffer())
+    if st.sidebar.button("فهرسة المستندات"):
+        with st.spinner("جاري قراءة وفهرسة المستند..."):
+            try:
+                # قراءة وتجزئة النص
+                loader = PyPDFLoader(file_path)
+                docs = loader.load()
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                splits = text_splitter.split_documents(docs)
+                
+                # إنشاء قاعدة البيانات المتجهة وحفظها
+                vectorstore = Chroma.from_documents(
+                    documents=splits, 
+                    embedding=embeddings, 
+                    persist_directory=persist_directory
+                )
+                st.sidebar.success("تمت الفهرسة بنجاح!")
+            except Exception as e:
+                st.sidebar.error(f"حدث خطأ أثناء الفهرسة: {e}")
 
-  st.sidebar.success(f"تم رفع الملف: {uploaded_file.name}")
+# 3. واجهة البحث الرئيسية
+st.title("📚 (RAG + LLM) نظام البحث الذكي والتوليد الآلي")
+st.write("اطرح سؤالاً، وسيقوم النظام بالبحث وتوليد إجابة نصية ذكية من ملفاتك.")
 
-  if st.sidebar.button("🔄 فهرسة المستندات"):
-    with st.spinner("جاري قراءة وفهرسة الملفات..."):
-      all_documents = []
-      pdf_files = [f for f in os.listdir(DOCS_DIR) if f.endswith(".pdf")]
+user_query = st.text_input("اكتب سؤالك هنا:")
 
-      for file in pdf_files:
-        f_path = os.path.join(DOCS_DIR, file)
-        loader = PyPDFLoader(f_path)
-        all_documents.extend(loader.load())
+if user_query:
+    with st.spinner("جاري البحث وتوليد الإجابة..."):
+        try:
+            context = ""
+            # التحقق من وجود قاعدة بيانات مفهرسة للبحث فيها
+            if os.path.exists(persist_directory):
+                vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+                retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+                relevant_docs = retriever.get_relevant_documents(user_query)
+                context = "\n".join([doc.page_content for doc in relevant_docs])
 
-      text_splitter = RecursiveCharacterTextSplitter(
-          chunk_size=400, chunk_overlap=40
-      )
-      texts = text_splitter.split_documents(all_documents)
-
-      embeddings = FixedHashingEmbeddings(n_features=384)
-      vectorstore = Chroma.from_documents(
-          texts, embeddings, persist_directory=VECTOR_DB_DIR
-      )
-      st.sidebar.success("✅ تمت فهرسة جميع المستندات بنجاح!")
-
-st.write("اطرح سؤالاً، وسيقوم النظام بالبحث وتوليد إجابة نصية ذكية من ملفاتك:")
-
-if os.path.exists(VECTOR_DB_DIR):
-  embeddings = FixedHashingEmbeddings(n_features=384)
-  vectorstore = Chroma(
-      persist_directory=VECTOR_DB_DIR, embedding_function=embeddings
-  )
-
-  query = st.text_input("اكتب سؤالك هنا:")
-
-  if query:
-    with st.spinner(
-        "جاري البحث واستخلاص الإجابة السريعة عبر Ollama (قد يستغرق بعض الوقت"
-        " لأول مرة)..."
-    ):
-      try:
-        # تقليل عدد المقاطع المسترجعة إلى 1 لسرعة الاستجابة وتجنب الـ Timeout
-        docs = vectorstore.similarity_search(query, k=1)
-
-        if docs:
-          cleaned_docs = [clean_arabic_text(doc.page_content) for doc in docs]
-          context_text = "\n\n".join(cleaned_docs)
-
-          ai_answer = query_ollama_llm(context_text, query)
-
-          st.subheader("💡 الإجابة الذكية:")
-          st.success(ai_answer)
-
-          with st.expander("📄 عرض المقطع الأصلي المنظف"):
-            for i, text in enumerate(cleaned_docs):
-              st.info(f"**المقطع المطابق:**\n\n{text}")
-        else:
-          st.warning("لم يتم العثور على نتائج مطابقة للسؤال.")
-      except Exception as e:
-        st.error(f"حدث خطأ أثناء المعالجة: {e}")
-else:
-  st.warning("⚠️ يرجى رفع ملف PDF وفهرسته من القائمة الجانبية للبدء.")
+            # دمج السياق المستخرج مع سؤال المستخدم وإرساله لـ Gemini
+            prompt = f"استناداً إلى المعلومات التالية:\n{context}\n\nأجب عن السؤال التالي: {user_query}"
+            response = model.generate_content(prompt)
+            
+            st.subheader("💡 الإجابة الذكية:")
+            st.write(response.text)
+            
+            if context:
+                with st.expander("عرض المقاطع الأصلية المستخرجة من الملف"):
+                    st.write(context)
+                    
+        except Exception as e:
+            st.error(f"حدث خطأ أثناء الاتصال بالنموذج: {e}")
