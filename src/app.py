@@ -13,7 +13,7 @@ if api_key:
 else:
     st.error("الرجاء إعداد GEMINI_API_KEY في إعدادات المنصة (Secrets).")
 
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
 st.set_page_config(page_title="نظام البحث الذكي للمكتبة (RAG)", layout="wide")
 
