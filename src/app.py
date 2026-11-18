@@ -4,7 +4,7 @@ import google.generativeai as genai
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # 1. إعداد مفتاح Gemini API
 api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
@@ -25,7 +25,6 @@ persist_directory = "vector_db"
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 if uploaded_file is not None:
-    # حفظ الملف مؤقتًا على الخادم
     os.makedirs("data", exist_ok=True)
     file_path = os.path.join("data", uploaded_file.name)
     with open(file_path, "wb") as f:
@@ -35,13 +34,11 @@ if uploaded_file is not None:
     if st.sidebar.button("فهرسة المستندات"):
         with st.spinner("جاري قراءة وفهرسة المستند..."):
             try:
-                # قراءة وتجزئة النص
                 loader = PyPDFLoader(file_path)
                 docs = loader.load()
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 splits = text_splitter.split_documents(docs)
-                
-                # إنشاء قاعدة البيانات المتجهة وحفظها
+
                 vectorstore = Chroma.from_documents(
                     documents=splits, 
                     embedding=embeddings, 
@@ -61,23 +58,21 @@ if user_query:
     with st.spinner("جاري البحث وتوليد الإجابة..."):
         try:
             context = ""
-            # التحقق من وجود قاعدة بيانات مفهرسة للبحث فيها
             if os.path.exists(persist_directory):
                 vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
                 retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-                relevant_docs = retriever.get_relevant_documents(user_query)
+                relevant_docs = retriever.invoke(user_query)
                 context = "\n".join([doc.page_content for doc in relevant_docs])
 
-            # دمج السياق المستخرج مع سؤال المستخدم وإرساله لـ Gemini
             prompt = f"استناداً إلى المعلومات التالية:\n{context}\n\nأجب عن السؤال التالي: {user_query}"
             response = model.generate_content(prompt)
-            
+
             st.subheader("💡 الإجابة الذكية:")
             st.write(response.text)
-            
+
             if context:
                 with st.expander("عرض المقاطع الأصلية المستخرجة من الملف"):
                     st.write(context)
-                    
+
         except Exception as e:
             st.error(f"حدث خطأ أثناء الاتصال بالنموذج: {e}")
